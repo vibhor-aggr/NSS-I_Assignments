@@ -37,6 +37,10 @@ int main(int argc, char* argv[]){
   seteuid(getuid());
   int noOptc = 0;
   char** noOptv = (char **)malloc(sizeof(char*)*argc);
+  if (noOptv == NULL) {
+    perror("create_dir: malloc");
+    return 1;
+  }
   separateOpts(argc, argv, &noOptc, noOptv);
   if(noOptc==1){
     printf("create_dir: missing operand\n");
@@ -54,6 +58,7 @@ int main(int argc, char* argv[]){
     getAclFilename(argv[0], &aclPtr);
     if(!checkPermFromAcl(aclFileName, userName, 'x', false)){
       printf("create_dir: %s denied permission to create_dir\n", userName);
+      free(noOptv);
       return 1;
     }    
   }
@@ -104,7 +109,7 @@ int main(int argc, char* argv[]){
         if (!ret && S_ISDIR(sb.st_mode)) {
           isDir = true;
         }
-        if (errno == EEXIST && !isDir || errno != EEXIST && errno != ENOENT) {
+        if ((errno == EEXIST && !isDir) || (errno != EEXIST && errno != ENOENT)) {
           printf("create_dir: cannot create directory '%s': %s\n",noOptv[i], strerror(errno));
           free(noOptv);
           print_create_dir_usage();
@@ -120,7 +125,7 @@ int main(int argc, char* argv[]){
     }
     char s[BUFSIZE];
     int k=0;
-    for(int j=0;j<strlen(noOptv[i]);j++){
+    for(size_t j=0;j<strlen(noOptv[i]);j++){
       if(noOptv[i][j]=='/'){
         if(k==0){
           s[k++]='/';

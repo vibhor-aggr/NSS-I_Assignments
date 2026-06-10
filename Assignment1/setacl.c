@@ -22,6 +22,11 @@ int main(int argc, char* argv[]){
   char* optStr[]={"-m","--modify","-x","--remove","--help"};
   bool  optVal[]={false, false, false, false, false};
 
+  if (argc < 2) {
+    print_setacl_usage();
+    return 1;
+  }
+
   if (!searchOpts(argc, argv, 5, optStr, optVal)) {
     print_setacl_usage();
     return -1;
@@ -32,18 +37,31 @@ int main(int argc, char* argv[]){
     return 0;
   }
 
+  if (argc != 4) {
+    print_setacl_usage();
+    return 1;
+  }
+
   bool sModify = optVal[0] || optVal[1];
   bool sRemove = optVal[2] || optVal[3];
+  if (!sModify && !sRemove) {
+    print_setacl_usage();
+    return 1;
+  }
   
   char* token;
   token=strtok(argv[2], ":");
-  if(strcmp(token, "u")){
-    printf("setacl: Wrong modifier %s\n", token);
+  if(token == NULL || strcmp(token, "u")){
+    printf("setacl: Wrong modifier %s\n", token == NULL ? "(null)" : token);
     print_setacl_usage();
     return 1;
   }
   seteuid(getuid());
   token=strtok(NULL, ":");
+  if (token == NULL) {
+    print_setacl_usage();
+    return 1;
+  }
   const char* userName=token;
   struct passwd *user_info = getpwnam(userName);
   if(user_info==NULL){
@@ -53,12 +71,12 @@ int main(int argc, char* argv[]){
   }
   if(sModify){
     token=strtok(NULL, ":");
-    if(strlen(token)!=3){
-      printf("setacl: Wrong modifier %s\n", token);
+    if(token == NULL || strlen(token)!=3){
+      printf("setacl: Wrong modifier %s\n", token == NULL ? "(null)" : token);
       print_setacl_usage();
       return 1;
     }
-    if(token[0]!='r' && token[0]!='-' || token[1]!='w' && token[1]!='-' || token[2]!='x' && token[2]!='-'){
+    if((token[0]!='r' && token[0]!='-') || (token[1]!='w' && token[1]!='-') || (token[2]!='x' && token[2]!='-')){
       printf("setacl: Wrong modifier %s\n", token);
       print_setacl_usage();
       return 1;

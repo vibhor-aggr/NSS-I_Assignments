@@ -18,6 +18,10 @@ void print_getacl_usage()
 }
 
 int main(int argc, char* argv[]){
+  if (argc != 2) {
+    print_getacl_usage();
+    return 1;
+  }
   if (!strcmp(argv[1], "--help")) {
     print_getacl_usage();
     return 0;

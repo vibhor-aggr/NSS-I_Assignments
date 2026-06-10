@@ -16,6 +16,25 @@ void print_fput_usage()
   return;
 }
 
+static int write_all(int fd, const char *buf, size_t size)
+{
+  size_t written = 0;
+  while (written < size) {
+    ssize_t ret = write(fd, buf + written, size - written);
+    if (ret < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    if (ret == 0) {
+      return -1;
+    }
+    written += (size_t)ret;
+  }
+  return 0;
+}
+
 int main(int argc, char* argv[]){
   //uid_t call_euid=geteuid();
   /*if(seteuid(1001)==-1){
@@ -55,9 +74,11 @@ int main(int argc, char* argv[]){
         return 1;
       }
       size_t size=strlen(argv[2]);
-      //use write sys call
-      while(write(fd, argv[2], size)!=size);
-      while(write(fd, "\n", 1)!=1);
+      if (write_all(fd, argv[2], size) != 0 || write_all(fd, "\n", 1) != 0) {
+        perror("fput: Error writing file");
+        close(fd);
+        return 1;
+      }
       close(fd);
       seteuid(getuid());
     }
@@ -80,10 +101,14 @@ int main(int argc, char* argv[]){
       char aclFileName[1024];
       char* aclPtr=&aclFileName[0];
       char* dir_copy=strdup(argv[1]);
+      if (dir_copy == NULL) {
+        perror("fput: strdup");
+        return 1;
+      }
       char* pdir=dirname(dir_copy);
       if(stat(pdir, &file_info)==0){
         getAclFilename(pdir, &aclPtr);
-        if(checkPermFromAcl(aclFileName, userName, 'w', false)){
+        if(checkPermFromAcl(aclFileName, userName, 'w', true)){
           if(seteuid(file_info.st_uid)==-1){
             perror("setuid failure");
             return 1;
@@ -91,9 +116,11 @@ int main(int argc, char* argv[]){
         }
         else{
           printf("fput: %s denied permission to write to %s\n", userName, argv[1]);
+          free(dir_copy);
           return 1;
         }
       }
+      free(dir_copy);
     }
     int fd=open(argv[1], O_CREAT | O_RDWR, 0644);
     if(fd==-1){
@@ -104,9 +131,11 @@ int main(int argc, char* argv[]){
     //seteuid by getting info from stat of file before write
     //seteuid(file_info.st_uid);
     size_t size=strlen(argv[2]);
-    //use write sys call
-    while(write(fd, argv[2], size)!=size);
-    while(write(fd, "\n", 1)!=1);
+    if (write_all(fd, argv[2], size) != 0 || write_all(fd, "\n", 1) != 0) {
+      perror("fput: Error writing file");
+      close(fd);
+      return 1;
+    }
     close(fd);
     //seteuid(getuid());
   }

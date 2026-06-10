@@ -1,293 +1,324 @@
+#define _GNU_SOURCE
+#include <errno.h>
+#include <libgen.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <errno.h>
 #include <string.h>
-#include <stdbool.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
-#include <libgen.h>
+
 #include "utils.h"
 
-/*
-Assumptions
-The acl for the file or directory is stored in a separate file with .acl
-file is created only using fput the very first timeAt file creation acl for file is created using dacFor subsequent fput or fget, permission is managed only using acl
-fget or file is read only after creation
-during fput string can either be appended to existing string or file is overwritten
-fget prints the file content on the terminal
-currently acl is based on user name, handling for group and other permission can be done later
-*/
+#define ACL_PATH_MAX 1024
+#define ACL_LINE_MAX 1024
 
-/*
- * Create <file>.acl for given file/directory, this is called when the file/directory is created for the first time
- * It calls stat() function call internally and populates user/group/other rwx permissions in the acl file
- */
-bool createAclFromStat(const char* file)
+static void build_perm(mode_t mode, mode_t r, mode_t w, mode_t x, char out[4])
 {
-    char aclFileName[1024];
-    char* aclPtr=&aclFileName[0];
-    getAclFilename(file, &aclPtr);
-
-    FILE* aclFile = fopen(aclFileName, "w");
-    if (aclFile == NULL) {
-        perror("Error creating hidden file");
-        return false;
-    }
-
-    // copy permissions from stat to hidden acl file
-    struct stat statbuf;
-    stat(aclFileName, &statbuf);
-    mode_t fileModeRUsr = statbuf.st_mode & (S_IRUSR);
-    mode_t fileModeWUsr = statbuf.st_mode & (S_IWUSR);
-    mode_t fileModeXUsr = statbuf.st_mode & (S_IXUSR);
-    mode_t fileModeRGrp = statbuf.st_mode & (S_IRGRP);
-    mode_t fileModeWGrp = statbuf.st_mode & (S_IWGRP);
-    mode_t fileModeXGrp = statbuf.st_mode & (S_IXGRP);
-    mode_t fileModeROth = statbuf.st_mode & (S_IROTH);
-    mode_t fileModeWOth = statbuf.st_mode & (S_IWOTH);
-    mode_t fileModeXOth = statbuf.st_mode & (S_IXOTH);
-    //save as default:<mode_t>
-
-    char uPerm[4], gPerm[4], oPerm[4];
-    uPerm[0]='\0';
-    gPerm[0]='\0';
-    oPerm[0]='\0';
-
-    if(fileModeRUsr==S_IRUSR){
-      strcat(uPerm, "r");
-    }
-    else{
-      strcat(uPerm, "-");
-    }
-    if(fileModeWUsr==S_IWUSR){
-      strcat(uPerm, "w");
-    }
-    else{
-      strcat(uPerm, "-");
-    }
-    if(fileModeXUsr==S_IXUSR){
-      strcat(uPerm, "x");
-    }
-    else{
-      strcat(uPerm, "-");
-    }
-
-    if(fileModeRGrp==S_IRGRP){
-      strcat(gPerm, "r");
-    }
-    else{
-      strcat(gPerm, "-");
-    }
-    if(fileModeWGrp==S_IWGRP){
-      strcat(gPerm, "w");
-    }
-    else{
-      strcat(gPerm, "-");
-    }
-    if(fileModeXGrp==S_IXGRP){
-      strcat(gPerm, "x");
-    }
-    else{
-      strcat(gPerm, "-");
-    }
-
-    if(fileModeROth==S_IROTH){
-      strcat(oPerm, "r");
-    }
-    else{
-      strcat(oPerm, "-");
-    }
-    if(fileModeWOth==S_IWOTH){
-      strcat(oPerm, "w");
-    }
-    else{
-      strcat(oPerm, "-");
-    }
-    if(fileModeXOth==S_IXOTH){
-      strcat(oPerm, "x");
-    }
-    else{
-      strcat(oPerm, "-");
-    }
-
-    fprintf(aclFile, "%s::%s\n", "default:user", uPerm);
-    fprintf(aclFile, "%s::%s\n", "default:group", gPerm);
-    fprintf(aclFile, "%s::%s\n", "default:other", oPerm);
-    fprintf(aclFile, "%s:%s:%s\n", "user", getUsrName(statbuf.st_uid), uPerm);
-    // user:<user_name>:rwx
-    fclose(aclFile);
-    return true;
+  out[0] = (mode & r) ? 'r' : '-';
+  out[1] = (mode & w) ? 'w' : '-';
+  out[2] = (mode & x) ? 'x' : '-';
+  out[3] = '\0';
 }
 
-/* acl file format
-// default:user:rwx
-// default:group:rwx
-// default:other:rwx
-// user:<user_name>:rwx
-*/
-
-/*
- * read acl file and check for entry of 'userName', if entry is not found, return false
- * there should be only one matching entry for given userName, check if permission in that entry
- * is aligned by input 'perm' (which can be 'r', 'w' or 'x'), if yes return true else false
- */
-bool checkPermFromAcl(const char* aclfile, const char* userName, char perm, bool okIfNoAcl)
-{   
-    uid_t call_euid=geteuid();
-    struct stat file_info;
-    if(stat(aclfile, &file_info)==0){
-      seteuid(file_info.st_uid);
-    }
-    else{
-      seteuid(call_euid);
-      if(okIfNoAcl){
-        return true;
-      }
-      return false;
-    }
-    FILE* file=fopen(aclfile, "r");
-    if(file==NULL){
-      seteuid(call_euid);
-      if(okIfNoAcl){
-        return true;
-      }
-      return false;
-    }
-    //char* line=malloc(1024*sizeof(char));
-    char line[1024];
-    char* lineptr=&line[0];
-    size_t len=1024;
-    ssize_t read;
-    char* token;
-    while ((read = getline(&lineptr, &len, file)) != -1){
-      token=strtok(line, ":");
-      if(strcmp(token, "default")==0){
-          continue;
-      }
-      if(strcmp(token, "user")==0){
-        token=strtok(NULL, ":");
-        if(strcmp(token, userName)==0){
-          token=strtok(NULL, ":");
-          break;
-        }
-      }
-    }
-    //free(line);
-    fclose(file);
-    seteuid(call_euid);
-    return (strchr(token, perm)!=NULL);
-}
-
-/*
- * read acl file and check for entry of 'userName', if entry is not found, create a new entry
- * there should be only one matching entry for given userName, check if permission in that entry
- * is aligned by input 'perm' (which can be 'r', 'w' or 'x'), if yes return true else false
- */
-bool setPermInAcl(const char* aclfile, const char* userName, char perm[4])
+static int valid_perm_string(const char *perm)
 {
-    uid_t call_euid=geteuid();
-    struct stat file_info;
-    if(stat(aclfile, &file_info)==0){
-      seteuid(file_info.st_uid);
-    }
-    else{
-      seteuid(call_euid);
-      return false;
-    }
-    FILE* file=fopen(aclfile, "r+");
-    //char* line=malloc(1024*sizeof(char));
-    char line[1024];
-    char* lineptr=&line[0];
-    size_t len=1024;
-    ssize_t read;
-    int pos, pos_new;
-    int user_exist_acl=0;
-    while ((read = getline(&lineptr, &len, file)) != -1){
-      char* token=strtok(line, ":");
-      if(strcmp(token, "default")==0){
-        pos=ftell(file);  
-        continue;
-      }
-      char modLine[1024];
-      if(strcmp(token, "user")==0){
-        sprintf(modLine, "%s:", token);
-        token=strtok(NULL, ":");
-        if(strcmp(token, userName)==0){
-					user_exist_acl=1;
-          sprintf(modLine+5, "%s:", userName);
-          //token=strtok(NULL, ":");
-          pos_new=ftell(file);
-          fseek(file, pos, SEEK_SET);
-          sprintf(modLine+5+strlen(userName)+1, "%s\n", perm);
-          fputs(modLine, file);
-          fseek(file, pos_new, SEEK_SET);
-        }
-      }
-      pos=ftell(file);
-    }
-    //free(line);
-    fclose(file);
-    if(user_exist_acl==0){
-      FILE* file=fopen(aclfile, "a");
-      fprintf(file, "%s:%s:%s\n", "user", userName, perm);
-      fclose(file);
-    }
-    seteuid(call_euid);
-    return true;
+  return perm != NULL && strlen(perm) >= 3 &&
+         (perm[0] == 'r' || perm[0] == '-') &&
+         (perm[1] == 'w' || perm[1] == '-') &&
+         (perm[2] == 'x' || perm[2] == '-');
 }
 
-int printAcl(const char* aclfile){
-    uid_t call_euid=geteuid();
-    struct stat file_info;
-    if(stat(aclfile, &file_info)==0){
-      seteuid(file_info.st_uid);
-    }
-    else{
-      seteuid(call_euid);
-      perror("Error opening file");
-      return 1;
-    }
-    FILE* file=fopen(aclfile, "r");
-    if (file == NULL) {
-       seteuid(call_euid);
-       perror("Error opening file");
-       return 1;
-    }
-    //char* line=malloc(1024*sizeof(char));
-    char line[1024];
-    char* lineptr=&line[0];
-    size_t len=1024;
-    ssize_t read;
-    while ((read = getline(&lineptr, &len, file)) != -1){
-      printf("%s", line);
-    }
-    //free(line);
-    fclose(file);
-    seteuid(call_euid);
+static int line_has_perm(const char *line, const char *user_name, char perm)
+{
+  char copy[ACL_LINE_MAX];
+  char *kind;
+  char *name;
+  char *mode;
+
+  if (line == NULL || user_name == NULL) {
+    return -1;
+  }
+
+  if (snprintf(copy, sizeof(copy), "%s", line) >= (int)sizeof(copy)) {
+    return -1;
+  }
+
+  kind = strtok(copy, ":\n");
+  if (kind == NULL || strcmp(kind, "default") == 0) {
     return 0;
+  }
+  if (strcmp(kind, "user") != 0) {
+    return 0;
+  }
+
+  name = strtok(NULL, ":\n");
+  mode = strtok(NULL, ":\n");
+  if (name == NULL || mode == NULL || !valid_perm_string(mode)) {
+    return -1;
+  }
+  if (strcmp(name, user_name) != 0) {
+    return 0;
+  }
+  return strchr(mode, perm) != NULL;
 }
 
-void getAclFilename(const char* path, char** acl){
-  char* path_copy1=strdup(path);
-  char* path_copy2=strdup(path);
-  char* base=basename(path_copy1);
-  char* dir=dirname(path_copy2);
-  (*acl)[0]='\0';
-  strcat(*acl, dir);
-  strcat(*acl, "/.");
-  strcat(*acl, base);
-  strcat(*acl, ".acl");
+bool createAclFromStat(const char *file)
+{
+  char acl_file_name[ACL_PATH_MAX];
+  char *acl_ptr = acl_file_name;
+  struct stat statbuf;
+  FILE *acl_file;
+  char u_perm[4], g_perm[4], o_perm[4];
+  const char *owner_name;
+
+  if (file == NULL || stat(file, &statbuf) != 0) {
+    return false;
+  }
+
+  getAclFilename(file, &acl_ptr);
+  if (acl_file_name[0] == '\0') {
+    return false;
+  }
+
+  acl_file = fopen(acl_file_name, "w");
+  if (acl_file == NULL) {
+    perror("Error creating hidden file");
+    return false;
+  }
+
+  build_perm(statbuf.st_mode, S_IRUSR, S_IWUSR, S_IXUSR, u_perm);
+  build_perm(statbuf.st_mode, S_IRGRP, S_IWGRP, S_IXGRP, g_perm);
+  build_perm(statbuf.st_mode, S_IROTH, S_IWOTH, S_IXOTH, o_perm);
+
+  owner_name = getUsrName(statbuf.st_uid);
+  if (owner_name == NULL) {
+    fclose(acl_file);
+    return false;
+  }
+
+  fprintf(acl_file, "default:user:%s\n", u_perm);
+  fprintf(acl_file, "default:group:%s\n", g_perm);
+  fprintf(acl_file, "default:other:%s\n", o_perm);
+  fprintf(acl_file, "user:%s:%s\n", owner_name, u_perm);
+  fclose(acl_file);
+  return true;
+}
+
+bool checkPermFromAcl(const char *aclfile, const char *userName, char perm, bool okIfNoAcl)
+{
+  uid_t call_euid = geteuid();
+  struct stat file_info;
+  FILE *file;
+  char line[ACL_LINE_MAX];
+
+  if (aclfile == NULL || aclfile[0] == '\0' || userName == NULL) {
+    return false;
+  }
+
+  if (stat(aclfile, &file_info) != 0) {
+    if (okIfNoAcl) {
+      return true;
+    }
+    return false;
+  }
+
+  if (seteuid(file_info.st_uid) == -1) {
+    return false;
+  }
+
+  file = fopen(aclfile, "r");
+  if (file == NULL) {
+    seteuid(call_euid);
+    return okIfNoAcl;
+  }
+
+  while (fgets(line, sizeof(line), file) != NULL) {
+    int result = line_has_perm(line, userName, perm);
+    if (result < 0) {
+      fclose(file);
+      seteuid(call_euid);
+      return false;
+    }
+    if (result > 0) {
+      fclose(file);
+      seteuid(call_euid);
+      return true;
+    }
+  }
+
+  fclose(file);
+  seteuid(call_euid);
+  return false;
+}
+
+bool setPermInAcl(const char *aclfile, const char *userName, char perm[4])
+{
+  uid_t call_euid = geteuid();
+  struct stat file_info;
+  FILE *in;
+  FILE *out;
+  char tmp_path[ACL_PATH_MAX];
+  char line[ACL_LINE_MAX];
+  int found = 0;
+
+  if (aclfile == NULL || aclfile[0] == '\0' || userName == NULL || !valid_perm_string(perm)) {
+    return false;
+  }
+
+  if (stat(aclfile, &file_info) != 0) {
+    return false;
+  }
+  if (seteuid(file_info.st_uid) == -1) {
+    return false;
+  }
+
+  if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", aclfile, (long)getpid()) >=
+      (int)sizeof(tmp_path)) {
+    seteuid(call_euid);
+    return false;
+  }
+
+  in = fopen(aclfile, "r");
+  out = fopen(tmp_path, "w");
+  if (in == NULL || out == NULL) {
+    if (in != NULL) {
+      fclose(in);
+    }
+    if (out != NULL) {
+      fclose(out);
+      unlink(tmp_path);
+    }
+    seteuid(call_euid);
+    return false;
+  }
+
+  while (fgets(line, sizeof(line), in) != NULL) {
+    char copy[ACL_LINE_MAX];
+    char *kind;
+    char *name;
+
+    if (snprintf(copy, sizeof(copy), "%s", line) >= (int)sizeof(copy)) {
+      fclose(in);
+      fclose(out);
+      unlink(tmp_path);
+      seteuid(call_euid);
+      return false;
+    }
+
+    kind = strtok(copy, ":\n");
+    name = strtok(NULL, ":\n");
+    if (kind != NULL && name != NULL && strcmp(kind, "user") == 0 &&
+        strcmp(name, userName) == 0) {
+      fprintf(out, "user:%s:%s\n", userName, perm);
+      found = 1;
+    } else {
+      fputs(line, out);
+    }
+  }
+
+  if (!found) {
+    fprintf(out, "user:%s:%s\n", userName, perm);
+  }
+
+  fclose(in);
+  if (fclose(out) != 0 || rename(tmp_path, aclfile) != 0) {
+    unlink(tmp_path);
+    seteuid(call_euid);
+    return false;
+  }
+
+  seteuid(call_euid);
+  return true;
+}
+
+int printAcl(const char *aclfile)
+{
+  uid_t call_euid = geteuid();
+  struct stat file_info;
+  FILE *file;
+  char line[ACL_LINE_MAX];
+
+  if (aclfile == NULL || aclfile[0] == '\0' || stat(aclfile, &file_info) != 0) {
+    perror("Error opening file");
+    return 1;
+  }
+
+  if (seteuid(file_info.st_uid) == -1) {
+    perror("seteuid");
+    return 1;
+  }
+
+  file = fopen(aclfile, "r");
+  if (file == NULL) {
+    seteuid(call_euid);
+    perror("Error opening file");
+    return 1;
+  }
+
+  while (fgets(line, sizeof(line), file) != NULL) {
+    fputs(line, stdout);
+  }
+
+  fclose(file);
+  seteuid(call_euid);
+  return 0;
+}
+
+void getAclFilename(const char *path, char **acl)
+{
+  char *path_copy1;
+  char *path_copy2;
+  char *base;
+  char *dir;
+  int n;
+
+  if (acl == NULL || *acl == NULL) {
+    return;
+  }
+  (*acl)[0] = '\0';
+  if (path == NULL) {
+    return;
+  }
+
+  path_copy1 = strdup(path);
+  path_copy2 = strdup(path);
+  if (path_copy1 == NULL || path_copy2 == NULL) {
+    free(path_copy1);
+    free(path_copy2);
+    return;
+  }
+
+  base = basename(path_copy1);
+  dir = dirname(path_copy2);
+  n = snprintf(*acl, ACL_PATH_MAX, "%s/.%s.acl", dir, base);
+  if (n < 0 || n >= ACL_PATH_MAX) {
+    (*acl)[0] = '\0';
+  }
+
   free(path_copy1);
   free(path_copy2);
 }
 
-void change_uid(char* path){
+void change_uid(char *path)
+{
   struct stat file_info;
-  char* path_copy=strdup(path);
-  char *dir=dirname(path_copy);
-  if(stat(dir, &file_info)==0){
-  seteuid(file_info.st_uid);
+  char *path_copy;
+  char *dir;
+
+  if (path == NULL) {
+    return;
+  }
+
+  path_copy = strdup(path);
+  if (path_copy == NULL) {
+    return;
+  }
+
+  dir = dirname(path_copy);
+  if (stat(dir, &file_info) == 0) {
+    seteuid(file_info.st_uid);
   }
   free(path_copy);
 }
